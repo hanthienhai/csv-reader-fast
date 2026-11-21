@@ -8,20 +8,20 @@
 //
 //   {"columns":<the header record or null>,"rows":[<record>,...],"errors":[<error>,...]}
 //
-// The text itself is read by readText, WebAssembly (reader below, built by wasm.js when this module loads): 16 bytes
-// at a time it copies a field's bytes to the answer and finds the first byte that steers (i8x16.eq, i8x16.bitmask,
-// i32.ctz), and it writes each record as it ends. JavaScript reads the rest of the document (the array, each case's
-// id and input object) and writes the bytes around each text.
+// The text itself is read by readText, WebAssembly (reader.wasm, assembled from reader-src.js): 16 bytes at a time it
+// copies a field's bytes to the answer and finds the first byte that steers (i8x16.eq, i8x16.bitmask, i32.ctz), and
+// it writes each record as it ends. JavaScript reads the rest of the document (the array, each case's id and input
+// object) and writes the bytes around each text.
 //
 // Whether a case has a header is known only once its input object is read, often after its text, so the first
 // record is written where it would stand either way and the bytes around it are filled in at the end: the room
 // before it takes `{"columns":` or `{"columns":null,"rows":[`, the room after it `,"rows":[` or nothing, each padded
-// with spaces, which JSON reads past. readText keeps the errors as records (code, line, record index, a, b) and they
-// are written at the end, when a record index can be told as a row.
+// with spaces, which JSON reads past. readText keeps the errors as records (code, line, record index, a, b), and
+// writeErrors writes them at the end, when a record index can be told as a row.
 //
-// transduce returns null for anything it does not read itself (an escape \u, a key or a value an input does not
-// carry, a document that is not an array of {id, input}, a string that never ends, an answer past the room set
-// aside): the caller then answers every case with run. The output is the same JSON value either way.
+// transduce declines anything it does not read itself (an escape \u, a key or a value an input does not carry, a
+// document that is not an array of {id, input}, a string that never ends, an answer past the room set aside): the
+// caller then answers every case with run. The output is the same JSON value either way.
 
 import { readFileSync } from 'node:fs';
 
@@ -33,11 +33,6 @@ const COMMA = 0x2c;
 const OK = 0;
 const DECLINE = 4;
 
-const CODE_SHORT = 3;
-const CODE_LONG = 4;
-const CODE_BYTES = ['stray_cr', 'quote_junk', 'unterminated_quote', 'short_row', 'long_row'].map((s) =>
-  Buffer.from(`{"code":"${s}","line":`),
-);
 const PREFIX_ROOM = 24; // {"columns":null,"rows":[
 const GAP_ROOM = 9; // ,"rows":[
 const MARGIN = 65536; // room kept past every bound, for 16-byte stores and the bytes around a case
@@ -46,10 +41,6 @@ const COLUMNS_NULL = Buffer.from('{"columns":null,"rows":[');
 const COLUMNS_EMPTY = Buffer.from('{"columns":[],"rows":[');
 const ROWS_HEAD = Buffer.from(',"rows":[');
 const ERRORS_HEAD = Buffer.from('],"errors":[');
-const ROW_NULL = Buffer.from(',"row":null');
-const ROW_KEY = Buffer.from(',"row":');
-const FIELDS_KEY = Buffer.from(',"fields":');
-const EXTRA_KEY = Buffer.from(',"extra":[');
 
 /** How many quote bytes follow the document in memory: every read stops at one, whatever the document holds. */
 export const SENTINEL = 64;
@@ -125,7 +116,6 @@ export function transduce(bytes, size = bytes.length, emit = null) {
 function readDocument(st, ex, emit) {
   const b = st.buf;
   const len = st.size;
-  const errs = new Int32Array(st.memory.buffer);
   let p = 0;
   let o = st.outBase;
 
@@ -136,7 +126,7 @@ function readDocument(st, ex, emit) {
       else break;
     }
   };
-  // The key at p, a string with no escape, with p past its colon and the whitespace after; null: no such key.
+  // The key at p, a string with no escape, with p past its colon and the whitespace after; false: no such key.
   const key = () => {
     ws();
     if (b[p] !== DQ) return false;
@@ -144,7 +134,7 @@ function readDocument(st, ex, emit) {
     let e = s;
     while (e < len && b[e] !== DQ && b[e] !== BS) e++;
     if (b[e] !== DQ) return false;
-    const k = b.latin1Slice(s, e);
+    const k = b.toString('latin1', s, e);
     p = e + 1;
     ws();
     if (b[p] !== 0x3a) return false;
@@ -164,22 +154,6 @@ function readDocument(st, ex, emit) {
       } else p++;
     }
     return false;
-  };
-  const writeInt = (v) => {
-    if (v === 0) {
-      b[o++] = 0x30;
-      return;
-    }
-    const s = o;
-    while (v > 0) {
-      b[o++] = 0x30 + (v % 10);
-      v = Math.floor(v / 10);
-    }
-    for (let i = s, j = o - 1; i < j; i++, j--) {
-      const t = b[i];
-      b[i] = b[j];
-      b[j] = t;
-    }
   };
   const put = (src) => {
     src.copy(b, o);
@@ -251,28 +225,7 @@ function readDocument(st, ex, emit) {
     const cut = ex.rX.value - st.xBase;
     if (o + ERRORS_HEAD.length + 100 * ne + cut + 3 * (len - p) + 1024 > st.outEnd) return false;
     put(ERRORS_HEAD);
-    for (let i = 0, r = st.errBase >> 2; i < ne; i++, r += 5) {
-      if (i > 0) b[o++] = COMMA;
-      const code = errs[r];
-      put(CODE_BYTES[code]);
-      writeInt(errs[r + 1]);
-      const rec = errs[r + 2];
-      if (header === 1 && rec === 0) put(ROW_NULL);
-      else {
-        put(ROW_KEY);
-        writeInt(header === 1 ? rec - 1 : rec);
-      }
-      if (code === CODE_SHORT) {
-        put(FIELDS_KEY);
-        writeInt(errs[r + 3]);
-      } else if (code === CODE_LONG) {
-        put(EXTRA_KEY);
-        b.copy(b, o, errs[r + 3], errs[r + 4]);
-        o += errs[r + 4] - errs[r + 3];
-        b[o++] = 0x5d;
-      }
-      b[o++] = 0x7d;
-    }
+    o = ex.writeErrors(o, st.errBase, errEnd, header);
     b[o++] = 0x5d;
     b[o++] = 0x7d;
     return true;
