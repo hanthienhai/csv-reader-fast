@@ -416,6 +416,34 @@ local.tee $c
 i32.const 44
 i32.eq
 if
+;; the common case, kept in this loop: the field ends at a comma and the next opens unquoted (no \\" at p + 1,
+;; and no text after a closing quote to report). Close it, open the next with one store of \`","\`, and go on.
+local.get $junk
+i32.eqz
+local.get $p
+i32.load16_u offset=1
+i32.const 0x225C
+i32.ne
+i32.and
+if
+local.get $o
+i32.const 0x222C22
+i32.store
+${inc('$count', 1)}
+local.get $count
+local.get $width
+i32.eq
+if
+;; the record's first field past the first record's width: from its comma on, the cut fields
+local.get $o
+i32.const 1
+i32.add
+local.set $extraAt
+end
+${inc('$o', 3)}
+${inc('$p', 1)}
+br $u
+end
 ${inc('$p', 1)}
 i32.const 0
 local.set $ended

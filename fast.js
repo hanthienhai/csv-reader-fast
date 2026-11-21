@@ -64,9 +64,12 @@ function reader() {
  * `window` is the input window's first size (tests make it small, to cross its edges often).
  */
 export function transduceStream(read, size, write, window = 1 << 19) {
+  // The memory, sized up front for the windows and the error room below (it grows only if a window must).
+  const firstIn = Math.max(window, 64);
+  const firstPages = Math.ceil((4 * firstIn + 4 * SLACK + SENTINEL + 64 + (3 << 20) + 256) / 65536);
   let memory;
   try {
-    memory = new WebAssembly.Memory({ initial: 1 });
+    memory = new WebAssembly.Memory({ initial: firstPages });
   } catch {
     return false;
   }
@@ -83,7 +86,7 @@ export function transduceStream(read, size, write, window = 1 << 19) {
   };
 
   // The input window: [inBase, validEnd) read so far, SENTINEL quotes after it; p the next byte.
-  let inCap = Math.max(window, 64);
+  let inCap = firstIn;
   let inBase = alloc(inCap + SENTINEL + 64);
   let validEnd = inBase;
   let p = inBase;
