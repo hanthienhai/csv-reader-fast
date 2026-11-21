@@ -14,7 +14,7 @@ MAKEFUN_INPUT_DIR=<dir with cases.json> MAKEFUN_OUTPUT_DIR=<out dir> node main.t
 
 ## How it works
 
-- `fast.js` reads the JSON document (the array, each case's `id` and `input`) and calls `readText` once per case. It fills in the bytes around each answer once the case's `header` is known, and hands each answer to `main.ts`, which writes it out and reuses the memory for the next case.
+- `fast.js` streams the document through a 512 KiB window of WebAssembly memory and calls `readText` on each case's text; a record that runs past the window is read again once more input is in. Answers stream out through a window too. Each answer's first record and the bytes around it wait in the window until the case's `header` is known, then go to their place in the file.
 - `reader-src.js` holds `readText`, `writeErrors` and `writeInt` in a small subset of the WebAssembly text format. `wasm.js` assembles them into `reader.wasm` (`node tools/build-wasm.mjs`), so no toolchain is needed.
 - A field of the CSV text is a run of bytes in the JSON string, so it is copied as it stands. The bytes that steer the reader are a comma, the escapes `\"`, `\n` and `\r`, and the string's closing quote.
 

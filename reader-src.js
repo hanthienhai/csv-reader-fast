@@ -2,16 +2,21 @@
 // (node tools/build-wasm.mjs) assembles it with wasm.js into reader.wasm, which fast.js loads; tools/check-bytes.mjs
 // checks that reader.wasm is this source assembled.
 //
-// readText(p, o, e, x) reads the JSON string at p (its opening quote) as CSV text and writes its records at o, as
-// fast.js says, the error records (code, line, record index, a, b: five i32s each) at e and the long rows' cut fields
-// at x. It answers OK, with the ends in the globals rP, rO, rE, rX, the record count in rRecords and the room after
-// the first record in rGap; or DECLINE, for an escape \u or when the room set aside (the globals len, outEnd, errEnd,
-// xEnd) runs out.
+// readText(p, o, e, x) reads a case's text, a JSON string, from p as CSV and writes its records at o, as fast.js
+// says, the error records (code, line, record index, a, b: five i32s each) at e and the long rows' cut fields at x.
+// The input is read a window at a time: the globals sStart (1: p is the string's opening quote), sLine, sWidth,
+// sRecords and sGap carry the reading from one call to the next, and winEnd is where the input read so far ends,
+// past which the memory holds quotes. A bare quote before winEnd ends the text: readText answers OK with the ends in
+// rP, rO, rE, rX. A record that reaches winEnd is given up whole and readText answers NEED_INPUT, the ends and the
+// state as they stood before it; a short row with no room for its padding below outEnd, NEED_ROOM, the same way.
+// DECLINE: an escape \u, or no room left for errors (errEnd) or cut fields (xEnd).
 
 import { assemble } from './wasm.js';
 
 export const OK = 0;
 export const DECLINE = 4;
+export const NEED_INPUT = 5;
+export const NEED_ROOM = 6;
 const CODE_SHORT = 3;
 const CODE_LONG = 4;
 
@@ -44,6 +49,51 @@ local.get $e
 ${b}
 i32.store offset=16
 ${inc('$e', 20)}`;
+// Saves where the reading stands (the ends and the state) in the globals.
+const SAVE = `
+local.get $p
+global.set $rP
+local.get $o
+global.set $rO
+local.get $e
+global.set $rE
+local.get $x
+global.set $rX
+i32.const 0
+global.set $sStart
+local.get $line
+global.set $sLine
+local.get $width
+global.set $sWidth
+local.get $records
+global.set $sRecords
+local.get $gap
+global.set $sGap`;
+// Gives up the record being read (its bytes, errors and cut fields), saves the state as it stood before it and
+// answers code: the caller brings more input (NEED_INPUT) or room (NEED_ROOM) and calls again.
+const abort = (code) => `
+local.get $recP
+local.set $p
+local.get $recLine
+local.set $line
+local.get $rowStart
+local.set $o
+local.get $recE
+local.set $e
+local.get $recX
+local.set $x
+${SAVE}
+i32.const ${code}
+return`;
+// A bare quote at $p is the end of the text, or, at or past $winEnd, the end of the input read so far.
+const pastWindow = `
+local.get $p
+global.get $winEnd
+i32.ge_u
+if
+${abort(NEED_INPUT)}
+end`;
+
 // The 16 bytes at $p, stored at $o, and the mask of the bytes among them equal to any of the splats named.
 const scan = (...splats) => `
 local.get $p
@@ -66,7 +116,9 @@ local.set $sDQ
 i32.const 44
 i8x16.splat
 local.set $sCM
-;; past the opening quote, and past a U+FEFF at the very start
+;; the first call of a text: past its opening quote, and past a U+FEFF at its very start
+global.get $sStart
+if
 ${inc('$p', 1)}
 local.get $p
 i32.load16_u
@@ -81,13 +133,14 @@ if
 ${inc('$p', 3)}
 end
 end
-i32.const 1
+end
+global.get $sLine
 local.set $line
-i32.const -1
+global.get $sWidth
 local.set $width
-i32.const 0
+global.get $sRecords
 local.set $records
-i32.const -1
+global.get $sGap
 local.set $gap
 block $done
 loop $record
@@ -112,16 +165,25 @@ ${inc('$line', 1)}
 br $skip
 end
 end
+local.get $p
+local.set $recP
+local.get $line
+local.set $recLine
+local.get $o
+local.set $rowStart
+local.get $e
+local.set $recE
+local.get $x
+local.set $recX
 ;; the end of the text
 local.get $p
 i32.load8_u
 i32.const 34
 i32.eq
-br_if $done
-local.get $line
-local.set $recLine
-local.get $o
-local.set $rowStart
+if
+${pastWindow}
+br $done
+end
 local.get $records
 if
 local.get $o
@@ -195,7 +257,10 @@ local.get $p
 i32.load8_u
 i32.const 34
 i32.eq
-br_if $unterm
+if
+${pastWindow}
+br $unterm
+end
 local.get $p
 i32.load8_u offset=1
 local.set $d
@@ -297,6 +362,7 @@ local.get $c
 i32.const 34
 i32.eq
 if
+${pastWindow}
 i32.const 2
 local.set $ended
 br $fielddone
@@ -359,6 +425,7 @@ local.get $c
 i32.const 34
 i32.eq
 if
+${pastWindow}
 i32.const 2
 local.set $ended
 br $uend
@@ -474,7 +541,7 @@ i32.sub
 i32.const 3
 i32.mul
 i32.add
-global.get $len
+global.get $winEnd
 local.get $p
 i32.sub
 i32.const 3
@@ -483,8 +550,7 @@ i32.add
 global.get $outEnd
 i32.gt_u
 if
-i32.const ${DECLINE}
-return
+${abort(NEED_ROOM)}
 end
 local.get $count
 local.set $n
@@ -555,18 +621,7 @@ end
 end
 ;; past the closing quote
 ${inc('$p', 1)}
-local.get $p
-global.set $rP
-local.get $o
-global.set $rO
-local.get $e
-global.set $rE
-local.get $x
-global.set $rX
-local.get $records
-global.set $rRecords
-local.get $gap
-global.set $rGap
+${SAVE}
 i32.const ${OK}
 `;
 
@@ -717,7 +772,10 @@ export function readerBytes() {
   const i32 = (...names) => names.map((n) => [n, 'i32']);
   return assemble({
     memory: ['env', 'mem'],
-    globals: ['$len', '$outEnd', '$errEnd', '$xEnd', '$rP', '$rO', '$rE', '$rX', '$rRecords', '$rGap'],
+    globals: [
+      '$winEnd', '$outEnd', '$errEnd', '$xEnd', '$rP', '$rO', '$rE', '$rX',
+      '$sStart', '$sLine', '$sWidth', '$sRecords', '$sGap',
+    ],
     funcs: [
       {
         name: '$readText',
@@ -727,7 +785,7 @@ export function readerBytes() {
         locals: [
           ...i32(
             '$line', '$width', '$records', '$recLine', '$rowStart', '$count', '$extraAt', '$quoted', '$fieldStart',
-            '$ended', '$junk', '$keptFrom', '$open', '$openLine', '$c', '$d', '$m', '$n', '$gap',
+            '$ended', '$junk', '$keptFrom', '$open', '$openLine', '$c', '$d', '$m', '$n', '$gap', '$recP', '$recE', '$recX',
           ),
           ...['$v', '$sBS', '$sDQ', '$sCM'].map((n) => [n, 'v128']),
         ],

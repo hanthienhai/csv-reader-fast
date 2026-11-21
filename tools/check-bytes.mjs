@@ -23,10 +23,14 @@ const wasmOk = built.equals(fresh);
 
 const bytes = readFileSync(join(kit, 'practice/input/cases.json'));
 const expected = JSON.parse(readFileSync(join(kit, 'practice/reference/expected.json'), 'utf8')).cases.map((c) => c.output);
-const got = transduce(bytes);
-if (got === null) throw new Error('practice: the byte path declined the practice set');
-const ok = isDeepStrictEqual(JSON.parse(got.toString('utf8')), expected);
-console.log(`practice: ${ok ? 'identical' : 'DIFFERS'}`);
+// The practice set through the default window, and through small ones that it crosses thousands of times.
+let ok = true;
+for (const window of [undefined, 4096, 777]) {
+  const got = transduce(bytes, { window });
+  const same = got !== null && isDeepStrictEqual(JSON.parse(got.toString('utf8')), expected);
+  ok &&= same;
+  console.log(`practice, window ${window ?? 'default'}: ${same ? 'identical' : got === null ? 'DECLINED' : 'DIFFERS'}`);
+}
 
 let seed = 0x2545f491 ^ Number(process.argv[4] ?? 7);
 function rand(k) {
@@ -57,7 +61,9 @@ for (let bt = 0; bt < batches; bt++) {
     cases.push({ id: `f-${i}`, input: rand(3) === 0 ? { header, text } : { text, header } });
   }
   const want = cases.map((c) => JSON.parse(JSON.stringify(readCsv(c.input))));
-  const out = transduce(Buffer.from(JSON.stringify(cases)));
+  // Windows from tiny (a record or a field crosses its edge, it grows) to the default.
+  const window = [64, 100, 257, 1024, undefined][bt % 5];
+  const out = transduce(Buffer.from(JSON.stringify(cases)), { window });
   total += count;
   if (out === null) {
     bad += count;
