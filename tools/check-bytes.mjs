@@ -8,11 +8,18 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { transduce } from '../fast.js';
+import { readerBytes } from '../reader-src.js';
 
 const kit = process.argv[2];
 if (!kit) throw new Error('usage: node tools/check-bytes.mjs <kit dir> [batches] [seed]');
 const batches = Number(process.argv[3] ?? 300);
 const { readCsv } = await import(pathToFileURL(join(kit, 'baselines/csv-reader/vendor/csv-reader/index.js')).href);
+
+// reader.wasm must be reader-src.js assembled (node tools/build-wasm.mjs).
+const built = readFileSync(new URL('../reader.wasm', import.meta.url));
+const fresh = Buffer.from(readerBytes());
+console.log(`reader.wasm: ${built.equals(fresh) ? 'built from reader-src.js' : 'STALE: run node tools/build-wasm.mjs'}`);
+const wasmOk = built.equals(fresh);
 
 const bytes = readFileSync(join(kit, 'practice/input/cases.json'));
 const expected = JSON.parse(readFileSync(join(kit, 'practice/reference/expected.json'), 'utf8')).cases.map((c) => c.output);
@@ -82,4 +89,4 @@ if (empty === null || empty.toString() !== '[]') {
   bad += 1;
   console.log('[] did not transduce to []');
 }
-process.exit(ok && bad === 0 ? 0 : 1);
+process.exit(ok && wasmOk && bad === 0 ? 0 : 1);
